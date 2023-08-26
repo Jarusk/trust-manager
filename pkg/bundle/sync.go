@@ -187,38 +187,41 @@ func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
 	// which makes the files appear to be reliably deterministic.
 	ks := jks.New(jks.WithOrderedAliases())
 
-	c, err := parsePemToX509(trustBundle)
+	certs, err := parsePemToX509(trustBundle)
 	if err != nil {
-		return nil, fmt.Errorf("got invalid cert when trying to encode JKS: %w", err)
+		return nil, fmt.Errorf("got invalid cert when trying to parse encode JKS: %w", err)
 	}
 
-	alias := jksAlias(c.Raw, c.Subject.String())
+	for _, c := range certs {
 
-	// Note on CreationTime:
-	// Debian's JKS trust store sets the creation time to match the time that certs are added to the
-	// trust store (i.e., it's effectively time.Now() at the instant the file is generated).
-	// Using that method would make our JKS files in trust-manager non-deterministic, leaving us with
-	// two options if we want to maintain determinism:
-	// - Using something from the cert being added (e.g. NotBefore / NotAfter)
-	// - Using a fixed time (i.e. unix epoch)
-	// We use NotBefore here, arbitrarily.
+		alias := jksAlias(c.Raw, c.Subject.String())
 
-	err = ks.SetTrustedCertificateEntry(alias, jks.TrustedCertificateEntry{
-		CreationTime: c.NotBefore,
-		Certificate: jks.Certificate{
-			Type:    "X509",
-			Content: p.Bytes,
-		},
-	})
+		// Note on CreationTime:
+		// Debian's JKS trust store sets the creation time to match the time that certs are added to the
+		// trust store (i.e., it's effectively time.Now() at the instant the file is generated).
+		// Using that method would make our JKS files in trust-manager non-deterministic, leaving us with
+		// two options if we want to maintain determinism:
+		// - Using something from the cert being added (e.g. NotBefore / NotAfter)
+		// - Using a fixed time (i.e. unix epoch)
+		// We use NotBefore here, arbitrarily.
 
-	if err != nil {
-		// this error should never happen if we set jks.Certificate correctly
-		return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", alias, err)
+		err = ks.SetTrustedCertificateEntry(alias, jks.TrustedCertificateEntry{
+			CreationTime: c.NotBefore,
+			Certificate: jks.Certificate{
+				Type:    "X509",
+				Content: c.Raw,
+			},
+		})
+
+		if err != nil {
+			// this error should never happen if we set jks.Certificate correctly
+			return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", alias, err)
+		}
 	}
 
 	buf := &bytes.Buffer{}
 
-	err := ks.Store(buf, password)
+	err = ks.Store(buf, password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JKS file: %w", err)
 	}
