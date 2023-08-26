@@ -155,15 +155,9 @@ func (b *bundle) secretBundle(ctx context.Context, ref *trustapi.SourceObjectKey
 	return string(data), nil
 }
 
-// encodeJKS creates a binary JKS file from the given PEM-encoded trust bundle and password.
-// Note that the password is not treated securely; JKS files generally seem to expect a password
-// to exist and so we have the option for one.
-func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
+func parsePemToX509(trustBundle string) ([]*x509.Certificate, error) {
 	remaining := []byte(trustBundle)
-
-	// WithOrderedAliases ensures that trusted certs are added to the JKS file in order,
-	// which makes the files appear to be reliably deterministic.
-	ks := jks.New(jks.WithOrderedAliases())
+	parsed := []*x509.Certificate{}
 
 	for len(remaining) > 0 {
 		var p *pem.Block
@@ -175,32 +169,51 @@ func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
 
 		c, err := x509.ParseCertificate(p.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("got invalid cert when trying to encode JKS: %w", err)
+			return nil, fmt.Errorf("got invalid cert when trying to parse PEM: %w", err)
 		}
 
-		alias := jksAlias(c.Raw, c.Subject.String())
+		parsed = append(parsed, c)
+	}
 
-		// Note on CreationTime:
-		// Debian's JKS trust store sets the creation time to match the time that certs are added to the
-		// trust store (i.e., it's effectively time.Now() at the instant the file is generated).
-		// Using that method would make our JKS files in trust-manager non-deterministic, leaving us with
-		// two options if we want to maintain determinism:
-		// - Using something from the cert being added (e.g. NotBefore / NotAfter)
-		// - Using a fixed time (i.e. unix epoch)
-		// We use NotBefore here, arbitrarily.
+	return parsed, nil
+}
 
-		err = ks.SetTrustedCertificateEntry(alias, jks.TrustedCertificateEntry{
-			CreationTime: c.NotBefore,
-			Certificate: jks.Certificate{
-				Type:    "X509",
-				Content: p.Bytes,
-			},
-		})
+// encodeJKS creates a binary JKS file from the given PEM-encoded trust bundle and password.
+// Note that the password is not treated securely; JKS files generally seem to expect a password
+// to exist and so we have the option for one.
+func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
 
-		if err != nil {
-			// this error should never happen if we set jks.Certificate correctly
-			return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", alias, err)
-		}
+	// WithOrderedAliases ensures that trusted certs are added to the JKS file in order,
+	// which makes the files appear to be reliably deterministic.
+	ks := jks.New(jks.WithOrderedAliases())
+
+	c, err := parsePemToX509(trustBundle)
+	if err != nil {
+		return nil, fmt.Errorf("got invalid cert when trying to encode JKS: %w", err)
+	}
+
+	alias := jksAlias(c.Raw, c.Subject.String())
+
+	// Note on CreationTime:
+	// Debian's JKS trust store sets the creation time to match the time that certs are added to the
+	// trust store (i.e., it's effectively time.Now() at the instant the file is generated).
+	// Using that method would make our JKS files in trust-manager non-deterministic, leaving us with
+	// two options if we want to maintain determinism:
+	// - Using something from the cert being added (e.g. NotBefore / NotAfter)
+	// - Using a fixed time (i.e. unix epoch)
+	// We use NotBefore here, arbitrarily.
+
+	err = ks.SetTrustedCertificateEntry(alias, jks.TrustedCertificateEntry{
+		CreationTime: c.NotBefore,
+		Certificate: jks.Certificate{
+			Type:    "X509",
+			Content: p.Bytes,
+		},
+	})
+
+	if err != nil {
+		// this error should never happen if we set jks.Certificate correctly
+		return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", alias, err)
 	}
 
 	buf := &bytes.Buffer{}

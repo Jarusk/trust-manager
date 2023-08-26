@@ -33,6 +33,11 @@ func (in *AdditionalFormats) DeepCopyInto(out *AdditionalFormats) {
 		*out = new(KeySelector)
 		**out = **in
 	}
+	if in.PKCS12 != nil {
+		in, out := &in.PKCS12, &out.PKCS12
+		*out = new(KeySelector)
+		**out = **in
+	}
 	return
 }
 
