@@ -111,6 +111,9 @@ type AdditionalFormats struct {
 	// JKS requests a JKS-formatted binary trust bundle to be written to the target.
 	// The bundle is created with the hardcoded password "changeit".
 	JKS *KeySelector `json:"jks,omitempty"`
+	// PKCS12 requests a PKCS12-formatted binary trust bundle to be written to the target.
+	// The bundle is created with the hardcoded password "changeit".
+	PKCS12 *KeySelector `json:"pkcs12,omitempty"`
 }
 
 // NamespaceSelector defines selectors to match on Namespaces.
