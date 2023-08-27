@@ -19,6 +19,7 @@ package bundle
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -34,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
 	trustapi "github.com/cert-manager/trust-manager/pkg/apis/trust/v1alpha1"
 	"github.com/cert-manager/trust-manager/pkg/util"
@@ -155,9 +157,9 @@ func (b *bundle) secretBundle(ctx context.Context, ref *trustapi.SourceObjectKey
 	return string(data), nil
 }
 
-func parsePemToX509(trustBundle string) ([]*x509.Certificate, error) {
+func parsePem(trustBundle string) ([]pkcs12.TrustStoreEntry, error) {
 	remaining := []byte(trustBundle)
-	parsed := []*x509.Certificate{}
+	tsEntries := []pkcs12.TrustStoreEntry{}
 
 	for len(remaining) > 0 {
 		var p *pem.Block
@@ -172,29 +174,25 @@ func parsePemToX509(trustBundle string) ([]*x509.Certificate, error) {
 			return nil, fmt.Errorf("got invalid cert when trying to parse PEM: %w", err)
 		}
 
-		parsed = append(parsed, c)
+		tsEntries = append(tsEntries, pkcs12.TrustStoreEntry{
+			Cert:         c,
+			FriendlyName: keystoreAlias(c.Raw, c.Subject.CommonName),
+		})
 	}
 
-	return parsed, nil
+	return tsEntries, nil
 }
 
 // encodeJKS creates a binary JKS file from the given PEM-encoded trust bundle and password.
 // Note that the password is not treated securely; JKS files generally seem to expect a password
 // to exist and so we have the option for one.
-func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
+func encodeJKS(certs []pkcs12.TrustStoreEntry, password []byte) ([]byte, error) {
 
 	// WithOrderedAliases ensures that trusted certs are added to the JKS file in order,
 	// which makes the files appear to be reliably deterministic.
 	ks := jks.New(jks.WithOrderedAliases())
 
-	certs, err := parsePemToX509(trustBundle)
-	if err != nil {
-		return nil, fmt.Errorf("got invalid cert when trying to parse encode JKS: %w", err)
-	}
-
 	for _, c := range certs {
-
-		alias := jksAlias(c.Raw, c.Subject.String())
 
 		// Note on CreationTime:
 		// Debian's JKS trust store sets the creation time to match the time that certs are added to the
@@ -205,23 +203,23 @@ func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
 		// - Using a fixed time (i.e. unix epoch)
 		// We use NotBefore here, arbitrarily.
 
-		err = ks.SetTrustedCertificateEntry(alias, jks.TrustedCertificateEntry{
-			CreationTime: c.NotBefore,
+		err := ks.SetTrustedCertificateEntry(c.FriendlyName, jks.TrustedCertificateEntry{
+			CreationTime: c.Cert.NotBefore,
 			Certificate: jks.Certificate{
 				Type:    "X509",
-				Content: c.Raw,
+				Content: c.Cert.Raw,
 			},
 		})
 
 		if err != nil {
 			// this error should never happen if we set jks.Certificate correctly
-			return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", alias, err)
+			return nil, fmt.Errorf("failed to add cert with alias %q to trust store: %w", c.FriendlyName, err)
 		}
 	}
 
 	buf := &bytes.Buffer{}
 
-	err = ks.Store(buf, password)
+	err := ks.Store(buf, password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JKS file: %w", err)
 	}
@@ -229,13 +227,22 @@ func encodeJKS(trustBundle string, password []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// jksAlias creates a JKS-safe alias for the given DER-encoded certificate, such that
+func encodePKCS12(certs []pkcs12.TrustStoreEntry, password []byte) ([]byte, error) {
+
+	b, err := pkcs12.EncodeTrustStoreEntries(rand.Reader, certs, string(password))
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode X509 certs to PKCS12: %w", err)
+	}
+	return b, nil
+}
+
+// keystoreAlias creates a JKS-safe alias for the given DER-encoded certificate, such that
 // any two certificates will have a different aliases unless they're identical in every way.
 // This unique alias fixes an issue where we used the Issuer field as an alias, leading to
 // different certs being treated as identical.
 // The friendlyName is included in the alias as a UX feature when examining JKS files using a
 // tool like `keytool`.
-func jksAlias(derData []byte, friendlyName string) string {
+func keystoreAlias(derData []byte, friendlyName string) string {
 	certHashBytes := sha256.Sum256(derData)
 	certHash := hex.EncodeToString(certHashBytes[:])
 
@@ -258,7 +265,8 @@ func (b *bundle) syncTarget(ctx context.Context, log logr.Logger,
 	data string,
 ) (bool, error) {
 	target := bundle.Spec.Target
-	var binData *[]byte
+	var jksBinData *[]byte
+	var pkcs12BinData *[]byte
 
 	if target.ConfigMap == nil {
 		return false, errors.New("target not defined")
@@ -269,13 +277,27 @@ func (b *bundle) syncTarget(ctx context.Context, log logr.Logger,
 	var configMap corev1.ConfigMap
 	err := b.targetDirectClient.Get(ctx, client.ObjectKey{Namespace: namespace.Name, Name: bundle.Name}, &configMap)
 
-	if target.AdditionalFormats != nil && target.AdditionalFormats.JKS != nil {
-		j, err := encodeJKS(data, []byte(DefaultJKSPassword))
+	if target.AdditionalFormats != nil && (target.AdditionalFormats.JKS != nil || target.AdditionalFormats.PKCS12 != nil) {
+		certs, err := parsePem(data)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("got invalid cert when trying to parse PEM: %w", err)
 		}
 
-		binData = &j
+		if target.AdditionalFormats.JKS != nil {
+			j, err := encodeJKS(certs, []byte(DefaultJKSPassword))
+			if err != nil {
+				return false, err
+			}
+			jksBinData = &j
+		}
+
+		if target.AdditionalFormats.PKCS12 != nil {
+			p, err := encodePKCS12(certs, []byte(DefaultJKSPassword))
+			if err != nil {
+				return false, err
+			}
+			pkcs12BinData = &p
+		}
 	}
 
 	// If the ConfigMap doesn't exist yet, create it.
@@ -298,10 +320,16 @@ func (b *bundle) syncTarget(ctx context.Context, log logr.Logger,
 			},
 		}
 
-		if binData != nil {
-			configMap.BinaryData = map[string][]byte{
-				target.AdditionalFormats.JKS.Key: *binData,
-			}
+		if jksBinData != nil || pkcs12BinData != nil {
+			configMap.BinaryData = map[string][]byte{}
+		}
+
+		if jksBinData != nil {
+			configMap.BinaryData[target.AdditionalFormats.JKS.Key] = *jksBinData
+		}
+
+		if pkcs12BinData != nil {
+			configMap.BinaryData[target.AdditionalFormats.PKCS12.Key] = *pkcs12BinData
 		}
 
 		return true, b.targetDirectClient.Create(ctx, &configMap)
@@ -347,12 +375,12 @@ func (b *bundle) syncTarget(ctx context.Context, log logr.Logger,
 		}
 
 		configMap.Data[target.ConfigMap.Key] = data
-		if binData != nil {
+		if jksBinData != nil {
 			if configMap.BinaryData == nil {
 				configMap.BinaryData = make(map[string][]byte)
 			}
 
-			configMap.BinaryData[target.AdditionalFormats.JKS.Key] = *binData
+			configMap.BinaryData[target.AdditionalFormats.JKS.Key] = *jksBinData
 		}
 
 		needsUpdate = true

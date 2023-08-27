@@ -145,9 +145,12 @@ func (v *validator) validate(ctx context.Context, obj runtime.Object) (admission
 		el = append(el, field.Invalid(path.Child("target", "configMap"), configMap, "target configMap must be defined"))
 	} else if len(configMap.Key) == 0 {
 		el = append(el, field.Invalid(path.Child("target", "configMap", "key"), configMap.Key, "target configMap key must be defined"))
-	} else if bundle.Spec.Target.AdditionalFormats != nil && bundle.Spec.Target.AdditionalFormats.JKS != nil {
-		if bundle.Spec.Target.AdditionalFormats.JKS.Key == configMap.Key {
+	} else if bundle.Spec.Target.AdditionalFormats != nil {
+		if bundle.Spec.Target.AdditionalFormats.JKS != nil && bundle.Spec.Target.AdditionalFormats.JKS.Key == configMap.Key {
 			el = append(el, field.Invalid(path.Child("target", "additionalFormats", "jks", "key"), bundle.Spec.Target.AdditionalFormats.JKS.Key, "target JKS key must be different to configMap key"))
+		}
+		if bundle.Spec.Target.AdditionalFormats.PKCS12 != nil && bundle.Spec.Target.AdditionalFormats.PKCS12.Key == configMap.Key {
+			el = append(el, field.Invalid(path.Child("target", "additionalFormats", "pkcs12", "key"), bundle.Spec.Target.AdditionalFormats.PKCS12.Key, "target PKCS12 key must be different to configMap key"))
 		}
 	}
 

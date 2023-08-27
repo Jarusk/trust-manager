@@ -709,10 +709,14 @@ func Test_encodeJKSAliases(t *testing.T) {
 	// these conditions (where the issuer / subject is identical).
 	// Using different dummy certs would allow this test to pass but wouldn't actually test anything useful!
 	bundle := dummy.JoinCerts(dummy.TestCertificate1, dummy.TestCertificate2)
+	certs, err := parsePem(bundle)
+	if err != nil {
+		t.Fatalf("failed to load dummy data: %s", err)
+	}
 
 	password := []byte(DefaultJKSPassword)
 
-	jksFile, err := encodeJKS(bundle, password)
+	jksFile, err := encodeJKS(certs, password)
 	if err != nil {
 		t.Fatalf("didn't expect an error but got: %s", err)
 	}
@@ -750,7 +754,7 @@ func Test_jksAlias(t *testing.T) {
 		t.Fatalf("Dummy certificate TestCertificate1 couldn't be parsed: %s", err)
 	}
 
-	alias := jksAlias(cert.Raw, cert.Subject.String())
+	alias := keystoreAlias(cert.Raw, cert.Subject.String())
 
 	expectedAlias := "548b988f|CN=cmct-test-root,O=cert-manager"
 
